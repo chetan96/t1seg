@@ -1,0 +1,9 @@
+[project]
+name = "t1seg"
+version = "0.1.0"
+description = "Automated myocardial T1 mapping analysis (Fahmy et al., JCMR 2019) in PyTorch"
+requires-python = ">=3.10"
+dependencies = ["torch", "numpy", "scipy", "scikit-image", "matplotlib", "pydicom", "nibabel", "pyyaml", "tqdm"]
+
+[tool.setuptools]
+packages = ["t1seg"]

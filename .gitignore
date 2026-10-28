@@ -1,0 +1,7 @@
+data/
+runs/
+outputs/
+__pycache__/
+*.egg-info/
+.DS_Store
+*.pdf

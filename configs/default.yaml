@@ -1,0 +1,22 @@
+# Training config. Values marked (paper) follow Fahmy et al., JCMR 2019.
+data:
+  train_dir: data/synthetic/train
+  val_dir: data/synthetic/val
+  size: 256
+  augment: true          # translation .95 / mirror .95 / elastic .5 (paper)
+
+model:
+  base: 32
+  depth: 4
+  dropout: 0.2           # paper used 0.5 in every bottleneck; 0.2 trains faster from scratch
+
+train:
+  epochs: 30
+  batch_size: 8
+  lr: 1.0e-3             # Adam (paper)
+  weight_decay: 1.0e-3   # (paper)
+  lr_gamma: 0.95         # exponential decay per epoch (paper: "exponential decay rate")
+  dice_weight: 0.5       # 0 = pure cross-entropy (paper); adding soft Dice helps thin structures
+  num_workers: 0
+  init_from: null        # path to a checkpoint for transfer learning (paper re-used an LGE model)
+  out_dir: runs/default
