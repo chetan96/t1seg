@@ -1,0 +1,14 @@
+# Full Fahmy et al. pipeline for STONE data. Swap any stage by name.
+device: auto
+plugins: []
+pipeline:
+  size: 256
+  segmenter: {name: torch, checkpoint: runs/unet_paper/best.pt}   # or {name: ground_truth}
+  postprocess:                                                    # ordered; [] = none
+    - {name: largest_component, min_area_cm2: 5.0}
+    - {name: shape_qc, max_eccentricity: 0.65}
+    - {name: refine_from_reference, reference: longest_ti}
+  aligner: {name: polar, n_angles: 360, depth: 20, reference: shortest_ti}   # or {name: none}
+  fitter: {name: 2p}                                              # 3p for MOLLI
+  min_good_images: 8
+  analysis: {midwall_fraction: 0.3333, t1_range: [850, 1500]}     # native T1 @ 1.5 T

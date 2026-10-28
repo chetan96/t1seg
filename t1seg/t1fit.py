@@ -11,6 +11,8 @@ grid-search T1 and solve the linear part in closed form for every pixel at once
 """
 import numpy as np
 
+from .registry import FITTERS
+
 T1_GRID = np.arange(50.0, 3000.0, 2.0)
 
 
@@ -71,13 +73,35 @@ def fit_3p(signal, tis, grid=T1_GRID):
     return t1, a, np.sqrt(best_err)
 
 
-def fit_map(stack, tis, model="2p"):
-    """stack (K, ...) -> T1 map (...). Pixels with a NaN in any sample are left NaN."""
+def fit_map(stack, tis, fn):
+    """Apply a pixel-wise fit fn(signal (K,N), tis) -> T1 (N,) to stack (K, ...). Pixels with a NaN
+    in any sample are left NaN."""
     shape = stack.shape[1:]
     s = stack.reshape(stack.shape[0], -1)
     good = np.isfinite(s).all(0)
     t1 = np.full(s.shape[1], np.nan)
     if good.any():
-        fn = fit_2p if model == "2p" else fit_3p
-        t1[good] = fn(s[:, good], tis)[0]
+        t1[good] = fn(s[:, good], tis)
     return t1.reshape(shape)
+
+
+# ---- registered fitters: callable(stack (K, ...), tis) -> T1 map (...) -------------------------
+
+class PixelwiseFitter:
+    def __init__(self, t1_min=50.0, t1_max=3000.0, t1_step=2.0):
+        self.grid = np.arange(t1_min, t1_max, t1_step)
+
+    def __call__(self, stack, tis):
+        return fit_map(stack, tis, lambda s, t: self.fit(s, t, self.grid)[0])
+
+
+@FITTERS.register("2p")
+class TwoParam(PixelwiseFitter):
+    """|A (1 - 2 exp(-TI/T1))| -- STONE (paper)."""
+    fit = staticmethod(fit_2p)
+
+
+@FITTERS.register("3p")
+class ThreeParamMOLLI(PixelwiseFitter):
+    """|A - B exp(-TI/T1*)|, Look-Locker corrected -- MOLLI / shMOLLI."""
+    fit = staticmethod(fit_3p)

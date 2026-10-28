@@ -7,12 +7,17 @@ from scipy import ndimage as ndi
 from torch.utils.data import Dataset
 
 from .io import load_slice, pad_crop
+from .registry import DATASETS
+
+NORMALIZERS = {
+    "zscore": lambda x: (x - x.mean()) / (x.std() + 1e-6),          # paper
+    "minmax": lambda x: (x - x.min()) / (x.max() - x.min() + 1e-6),
+    "percentile": lambda x: np.clip((x - np.percentile(x, 1)) / (np.percentile(x, 99) - np.percentile(x, 1) + 1e-6), 0, 1),
+}
 
 
-def normalize(img):
-    """Per-image z-score (paper: subtract mean, divide by SD)."""
-    img = img.astype(np.float32)
-    return (img - img.mean()) / (img.std() + 1e-6)
+def normalize(img, method="zscore"):
+    return NORMALIZERS[method](img.astype(np.float32)).astype(np.float32)
 
 
 def elastic(img, mask, rng, alpha=30.0, sigma=6.0):
@@ -25,12 +30,17 @@ def elastic(img, mask, rng, alpha=30.0, sigma=6.0):
             ndi.map_coordinates(mask.astype(float), coords, order=1, mode="reflect") > 0.5)
 
 
+@DATASETS.register("npz_slices")
 class T1wSegDataset(Dataset):
-    """Paper augmentation: translation p=.95, mirroring p=.95, elastic p=.5, no intensity aug."""
+    """Every (T1w image, mask) pair from slice .npz files (see io.py).
+    Paper augmentation: translation p=.95, mirroring p=.95, elastic p=.5, no intensity aug."""
 
-    def __init__(self, files, size=256, augment=False, p_translate=0.95, p_mirror=0.95,
-                 p_elastic=0.5, max_shift=20, seed=0):
-        self.size, self.augment = size, augment
+    def __init__(self, files=None, root=None, size=256, augment=False, normalization="zscore",
+                 p_translate=0.95, p_mirror=0.95, p_elastic=0.5, max_shift=20, seed=0):
+        if files is None:
+            files = sorted(Path(root).glob("*.npz"))
+            files = [f for f in files if "_t1true" not in f.name]
+        self.size, self.augment, self.normalization = size, augment, normalization
         self.p = (p_translate, p_mirror, p_elastic)
         self.max_shift = max_shift
         self.rng = np.random.default_rng(seed)
@@ -42,7 +52,7 @@ class T1wSegDataset(Dataset):
 
     @classmethod
     def from_dir(cls, folder, **kw):
-        return cls(sorted(Path(folder).glob("*.npz")), **kw)
+        return cls(root=folder, **kw)
 
     def __len__(self):
         return len(self.items)
@@ -56,7 +66,7 @@ class T1wSegDataset(Dataset):
     def __getitem__(self, i):
         f, k = self.items[i]
         imgs, masks = self._get(f)
-        img, m = normalize(imgs[k]), masks[k].astype(bool)
+        img, m = normalize(imgs[k], self.normalization), masks[k].astype(bool)
         if self.augment:
             r = self.rng
             if r.random() < self.p[0]:

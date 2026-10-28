@@ -1,0 +1,12 @@
+# Same data/loss, different architecture: segmentation_models_pytorch U-Net with a ResNet-34 encoder.
+# pip install segmentation-models-pytorch   (set encoder_weights: imagenet for pretrained encoder)
+device: auto
+plugins: []
+data:
+  train: {name: npz_slices, root: data/synthetic/train, size: 256, augment: true}
+  val:   {name: npz_slices, root: data/synthetic/val,   size: 256}
+model: {name: smp, arch: Unet, encoder_name: resnet34, encoder_weights: null, in_channels: 1, n_classes: 2}
+loss: [{name: ce}, {name: dice, weight: 0.5}]
+optimizer: {name: AdamW, lr: 3.0e-4, weight_decay: 1.0e-4}
+scheduler: {name: CosineAnnealingLR, T_max: 30}
+train: {epochs: 30, batch_size: 8, num_workers: 0, out_dir: runs/smp_resnet34}

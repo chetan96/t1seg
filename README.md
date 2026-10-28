@@ -9,22 +9,64 @@ The authors did not release code, so this is built from the Methods section.
 An 8-epoch synthetic run (~6 min on an M2 via MPS) reaches val DSC ≈ 0.60 — train longer
 (`epochs: 30+`) for meaningful masks. Paper reports DSC 0.85 ± 0.07 on real STONE data.
 
+## Design: every stage is a plug-in
+
 ```
-T1w images (one slice, K inversion times)
-  └─ U-Net segmentation of LV myocardium, per image            t1seg/model.py
-      └─ largest object, >5 cm², Euler==0, eccentricity<=0.65   t1seg/postprocess.py
-          └─ failed masks: affine-fit the longest-TI mask onto them
-              └─ polar resampling per image (360 rays × C=20)    t1seg/polar.py   ← implicit motion correction
-                  └─ pixel-wise fit (2-param STONE / 3-param MOLLI) t1seg/t1fit.py
-                      └─ inverse polar onto shortest-TI image grid
-                          └─ mid-wall band (⅓ wall thickness), 850–1500 ms range   t1seg/analysis.py
+images ─▶ segmenter ─▶ postprocess steps ─▶ aligner ─▶ fitter ─▶ analysis
+          (torch ckpt   (largest_component,  (polar,     (2p, 3p,
+           any model,    shape_qc, refine,    none, …)    …)
+           GT, …)        …)
+training: dataset ─▶ model ─▶ loss terms ─▶ any torch.optim / lr_scheduler
+```
+
+Each stage is a **registry** (`t1seg/registry.py`) and configs pick components **by name + kwargs**.
+New paper / new idea → write one class, decorate it, reference it in YAML. No existing code changes.
+
+| Registry | Interface | Built-ins |
+|---|---|---|
+| `MODELS` | `nn.Module`: `(B,C,H,W) → logits (B,n_classes,H,W)` | `unet` (paper), `smp` (100+ encoders), `monai` (SwinUNETR, AttentionUnet…), `torchvision_deeplab` |
+| `LOSSES` | `f(logits, target) → scalar`, weighted list in YAML | `ce`, `dice`, `focal` |
+| `DATASETS` | torch `Dataset` → `(image, mask)` | `npz_slices` |
+| `SEGMENTERS` | `f(images (K,H,W), tis) → masks` | `torch` (any checkpoint), `ground_truth` |
+| `POSTPROCESS` | factory → `f(masks, ok, tis, spacing) → (masks, ok)` | `largest_component`, `shape_qc`, `refine_from_reference` |
+| `ALIGNERS` | `.align(images, masks, ok, tis) → Aligned` | `polar` (paper), `none` |
+| `FITTERS` | `f(stack (K,…), tis) → T1 (…)` | `2p` (STONE), `3p` (MOLLI) |
+
+`python -m t1seg [plugin.py …]` lists everything registered plus available devices.
+
+**Hardware:** `device: auto` (default) picks **CUDA → Apple MPS → CPU**. An explicit `device: cuda` / `cuda:1` /
+`mps` / `cpu` is honoured, and an unavailable one is an error rather than a silent CPU fallback.
+
+**Adding a method** — see `examples/plugin_example.py` (new model, post-processing step and fitter):
+
+```python
+from t1seg.registry import MODELS
+
+@MODELS.register("my_net")
+class MyNet(nn.Module): ...
+```
+```yaml
+plugins: [examples/plugin_example.py]     # or a dotted module name
+model: {name: my_net, width: 32}
+```
+
+Checkpoints store the model config + plugin list, so any architecture reloads with `load_checkpoint()`.
+
+**Override anything from the CLI** (`--set key.path=value`, YAML-parsed). Changing `X.name` to another
+component resets that block; then add its kwargs:
+
+```bash
+python scripts/train.py -c configs/train/unet_paper.yaml --set train.epochs=50 model.dropout=0.5 device=cuda
+python scripts/train.py -c configs/train/unet_paper.yaml --set model.name=smp model.encoder_name=resnet50 train.out_dir=runs/r50
+python scripts/run_pipeline.py --inputs … --set pipeline.aligner.name=none          # ablation
 ```
 
 ## Setup
 
 ```bash
 conda create -n t1seg python=3.11 && conda activate t1seg
-pip install -e .          # torch, numpy, scipy, scikit-image, ...
+pip install -e .              # core
+pip install -e ".[zoo]"       # + segmentation_models_pytorch, monai model zoos
 ```
 
 Uses CUDA if available, else Apple Silicon MPS, else CPU. On a Mac, make sure your conda is a
@@ -35,20 +77,23 @@ an x86/Rosetta conda gets no GPU and an old PyTorch.
 
 ```bash
 python scripts/make_synthetic.py --n-train 60 --n-val 10 --n-test 5
-python scripts/train.py -c configs/default.yaml --epochs 8
-python scripts/segment.py      --ckpt runs/default/best.pt --inputs data/synthetic/test/slice_*[0-9].npz   # segmentation only
-python scripts/run_pipeline.py --ckpt runs/default/best.pt --inputs data/synthetic/test/slice_*[0-9].npz   # full T1 pipeline
-python scripts/run_pipeline.py --use-gt-masks --inputs ...     # skip the FCN, test the rest
+python scripts/train.py   -c configs/train/unet_paper.yaml            # or configs/train/smp_resnet34.yaml
+python scripts/segment.py -c configs/pipeline/paper_stone.yaml --inputs data/synthetic/test/slice_*[0-9].npz
+python scripts/run_pipeline.py -c configs/pipeline/paper_stone.yaml --inputs data/synthetic/test/slice_*[0-9].npz
+python scripts/run_pipeline.py --inputs … --set pipeline.segmenter.name=ground_truth   # test stages after segmentation
 pytest -q tests
 ```
 
-Figures + `summary.json` land in `outputs/`.
+Figures + `summary.json` land in `outputs/`. Each training run writes `config.json`, `log.json`, `best.pt`, `last.pt`.
+
+Synthetic sanity check (GT masks, 3 slices): T1 error ≈ 10 ms with `polar` alignment vs 38–112 ms with `none`.
 
 ## Using real data
 
-Everything reads one `.npz` per slice: `images (K,H,W)`, `tis (K,)` ms (`np.inf` allowed),
+The `npz_slices` dataset reads one `.npz` per slice: `images (K,H,W)`, `tis (K,)` ms (`np.inf` allowed),
 optional `masks (K,H,W)`, `pixel_spacing (2,)`. Write a converter to that format
-(`t1seg/io.py` has `save_slice` and a best-effort `load_dicom_series`) and point the config at it.
+(`t1seg/io.py` has `save_slice` and a best-effort `load_dicom_series`) and point the config at it — or register
+your own `DATASETS` / `SEGMENTERS` entry that reads the native format directly.
 
 Public data options:
 - **CMRxRecon (2023/2024)** — multi-coil k-space plus reconstructed T1 mapping (MOLLI, 9 TIs) for ~300
@@ -63,7 +108,7 @@ Public data options:
 |---|---|---|
 | TensorFlow, ~9M params, 149 layers | PyTorch U-Net, ~7.8M params | exact layer layout isn't given |
 | dropout 0.5 in every bottleneck | 0.2 (configurable) | trains faster from scratch |
-| cross-entropy | CE + 0.5·soft Dice (set `dice_weight: 0` for paper) | thin annulus |
+| cross-entropy | `loss: [ce, {name: dice, weight: 0.5}]` (drop the dice term for paper) | thin annulus |
 | transfer learning from an LGE model | `init_from:` hook, no weights | not public |
 | STONE, 2-param fit | 2p and 3p (MOLLI Look-Locker + polarity restoration) | MOLLI is what most sites acquire |
 | eccentricity ≤ 0.65 | same constant | re-derive from your training masks |

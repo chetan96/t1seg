@@ -4,6 +4,8 @@ from scipy import ndimage as ndi
 from scipy.optimize import minimize
 from skimage.measure import euler_number, label, regionprops
 
+from .registry import POSTPROCESS
+
 MIN_AREA_CM2 = 5.0
 MAX_ECCENTRICITY = 0.65  # max seen in the paper's training set; re-derive on your data
 
@@ -62,18 +64,51 @@ def refine_with_reference(bad_mask, ref_mask):
     return (_warp(ref, res.x, c_ref) > 0.5).astype(np.uint8)
 
 
-def postprocess_series(masks, tis, pixel_spacing=(1.4, 1.4)):
-    """Clean + QC all masks of a slice and refine failures using the longest-TI mask.
+# ---- pipeline steps: f(masks, ok, tis, pixel_spacing) -> (masks, ok) --------------------------
 
-    Returns (masks, ok) where ok[k] says whether image k has a usable mask.
-    """
-    masks = np.stack([clean_mask(m, pixel_spacing) for m in masks])
-    ok = np.array([shape_ok(m) for m in masks])
-    k_ref = int(np.argmax(tis))  # longest TI -> best myocardium/blood contrast
-    if not ok[k_ref]:
-        return masks, ok  # paper: no refinement possible, failed images excluded
-    for k in np.where(~ok)[0]:
-        refined = refine_with_reference(masks[k], masks[k_ref])
-        if shape_ok(refined):
-            masks[k], ok[k] = refined, True
+@POSTPROCESS.register("largest_component")
+def step_largest_component(min_area_cm2=MIN_AREA_CM2):
+    def f(masks, ok, tis, pixel_spacing):
+        masks = np.stack([clean_mask(m, pixel_spacing, min_area_cm2) for m in masks])
+        return masks, ok & (masks.reshape(len(masks), -1).sum(1) > 0)
+    return f
+
+
+@POSTPROCESS.register("shape_qc")
+def step_shape_qc(max_eccentricity=MAX_ECCENTRICITY):
+    def f(masks, ok, tis, pixel_spacing):
+        return masks, ok & np.array([shape_ok(m, max_eccentricity) for m in masks])
+    return f
+
+
+@POSTPROCESS.register("refine_from_reference")
+def step_refine(reference="longest_ti", max_eccentricity=MAX_ECCENTRICITY):
+    """Paper: replace failed masks with the affine-fitted longest-TI mask."""
+    def f(masks, ok, tis, pixel_spacing):
+        masks, ok = masks.copy(), ok.copy()
+        k_ref = int(np.argmax(tis)) if reference == "longest_ti" else int(np.argmin(tis))
+        if not ok[k_ref]:
+            return masks, ok
+        for k in np.where(~ok)[0]:
+            refined = refine_with_reference(masks[k], masks[k_ref])
+            if shape_ok(refined, max_eccentricity):
+                masks[k], ok[k] = refined, True
+        return masks, ok
+    return f
+
+
+PAPER_STEPS = ["largest_component", "shape_qc", "refine_from_reference"]
+
+
+def build_steps(cfg):
+    return [POSTPROCESS.build(c) for c in (PAPER_STEPS if cfg is None else cfg)]
+
+
+def postprocess_series(masks, tis, pixel_spacing=(1.4, 1.4), steps=None):
+    """Run post-processing steps (default: the paper's chain). Returns (masks, ok)."""
+    steps = build_steps(None) if steps is None else steps
+    ok = np.ones(len(masks), bool)
+    masks = np.asarray(masks, np.uint8)
+    for f in steps:
+        masks, ok = f(masks, ok, np.asarray(tis, float), pixel_spacing)
     return masks, ok

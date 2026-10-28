@@ -1,0 +1,24 @@
+# U-Net trained as in Fahmy et al., JCMR 2019. Every block is a registry name + kwargs.
+device: auto            # auto = cuda > mps > cpu; or cuda | cuda:1 | mps | cpu
+plugins: []             # modules/.py files that register extra components, e.g. [examples/plugin_example.py]
+
+data:
+  train: {name: npz_slices, root: data/synthetic/train, size: 256, augment: true, normalization: zscore}
+  val:   {name: npz_slices, root: data/synthetic/val,   size: 256}
+
+model: {name: unet, in_channels: 1, n_classes: 2, base: 32, depth: 4, dropout: 0.2}  # paper dropout 0.5
+
+loss:                   # weighted sum; paper = ce only
+  - {name: ce, weight: 1.0}
+  - {name: dice, weight: 0.5}
+
+optimizer: {name: Adam, lr: 1.0e-3, weight_decay: 1.0e-3}      # any torch.optim class
+scheduler: {name: ExponentialLR, gamma: 0.95}                  # any torch.optim.lr_scheduler class, or null
+
+train:
+  epochs: 30
+  batch_size: 8
+  num_workers: 0
+  seed: 0
+  init_from: null       # checkpoint for transfer learning (matching tensors are copied)
+  out_dir: runs/unet_paper

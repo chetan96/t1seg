@@ -1,6 +1,7 @@
-"""Segmentation only: FCN masks (+ optional paper post-processing) for slice .npz files.
+"""Segmentation only: masks + post-processing for slice .npz files (stages from the pipeline config).
 
-    python scripts/segment.py --ckpt runs/default/best.pt --inputs data/synthetic/test/slice_*[0-9].npz
+    python scripts/segment.py -c configs/pipeline/paper_stone.yaml --inputs data/synthetic/test/slice_*[0-9].npz
+    python scripts/segment.py ... --set pipeline.segmenter.checkpoint=runs/smp_resnet34/best.pt pipeline.postprocess=[]
 Writes <out>/<name>_masks.npz (raw + post-processed masks), an overlay PNG, and Dice if GT masks exist.
 """
 import argparse
@@ -14,34 +15,32 @@ import matplotlib.pyplot as plt
 import numpy as np
 
 from t1seg.analysis import dice
+from t1seg.config import load_config
 from t1seg.io import load_slice, pad_crop
-from t1seg.pipeline import load_model, segment
-from t1seg.postprocess import postprocess_series
+from t1seg.pipeline import Pipeline
 
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--ckpt", required=True)
+    ap.add_argument("-c", "--config", default="configs/pipeline/paper_stone.yaml")
     ap.add_argument("--inputs", nargs="+", required=True)
     ap.add_argument("--out", default="outputs/seg")
-    ap.add_argument("--no-postprocess", action="store_true")
+    ap.add_argument("--set", nargs="*", default=[], metavar="KEY=VALUE")
     args = ap.parse_args()
 
-    model = load_model(args.ckpt)
+    pipe = Pipeline.from_config(load_config(args.config, args.set))
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
     rows = []
     for f in args.inputs:
         d = load_slice(f)
-        imgs = pad_crop(d["images"], 256)
-        raw = segment(model, imgs)
-        masks, ok = (raw, np.ones(len(raw), bool)) if args.no_postprocess else \
-            postprocess_series(raw, d["tis"], d["pixel_spacing"])
+        r = pipe.segment_only(d["images"], d["tis"], d["pixel_spacing"], masks=d.get("masks"))
+        imgs, raw, masks, ok = r["images"], r["raw_masks"], r["masks"], r["ok"]
         np.savez_compressed(out / f"{Path(f).stem}_masks.npz", raw=raw, masks=masks, ok=ok)
 
         row = dict(file=f, n_ok=int(ok.sum()), n=len(ok))
         if "masks" in d:
-            gt = pad_crop(d["masks"], 256)
+            gt = pad_crop(d["masks"], pipe.size)
             row["dice_raw"] = float(np.mean([dice(raw[k], gt[k]) for k in range(len(gt))]))
             row["dice_post"] = float(np.mean([dice(masks[k], gt[k]) for k in range(len(gt))]))
         rows.append(row)

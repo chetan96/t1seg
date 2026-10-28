@@ -1,0 +1,8 @@
+# MOLLI variant: 3-parameter Look-Locker fit, fewer images (8 for 5(3)3) so lower min_good_images.
+device: auto
+plugins: []
+pipeline:
+  segmenter: {name: torch, checkpoint: runs/unet_paper/best.pt}
+  aligner: {name: polar}
+  fitter: {name: 3p}
+  min_good_images: 6

@@ -9,6 +9,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from ..registry import MODELS
+
 
 class Bottleneck(nn.Module):
     """Two BN-ReLU-Conv units followed by dropout."""
@@ -27,11 +29,12 @@ class Bottleneck(nn.Module):
         return self.body(x)
 
 
+@MODELS.register("unet")
 class UNet(nn.Module):
-    def __init__(self, in_ch=1, n_classes=2, base=32, depth=4, dropout=0.2):
+    def __init__(self, in_channels=1, n_classes=2, base=32, depth=4, dropout=0.2):
         super().__init__()
         chs = [base * 2 ** i for i in range(depth + 1)]
-        self.stem = nn.Conv2d(in_ch, chs[0], 3, padding=1)
+        self.stem = nn.Conv2d(in_channels, chs[0], 3, padding=1)
         self.down = nn.ModuleList(
             [Bottleneck(chs[0], chs[0], dropout)]
             + [Bottleneck(chs[i - 1], chs[i], dropout) for i in range(1, depth + 1)]

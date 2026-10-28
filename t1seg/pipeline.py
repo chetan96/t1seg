@@ -1,69 +1,73 @@
-"""End-to-end per-slice pipeline (paper Fig. 1):
+"""Config-driven per-slice pipeline (paper Fig. 1). Every stage is a registry name:
 
-  T1w images --FCN--> masks --clean/QC/refine--> polar resampling (per image)
-  --pixel-wise fit--> polar T1 map --inverse polar--> Cartesian T1 map --> mid-wall stats
+    segmenter -> postprocess steps -> aligner -> fitter -> analysis
+
+    pipe = Pipeline.from_config(load_config("configs/pipeline.yaml"))
+    res = pipe(images, tis, pixel_spacing=..., masks=...)
+
+Swap any stage in the YAML (or with --set aligner.name=none) without touching code.
+`Pipeline.segment_only(...)` stops after post-processing.
 """
 import numpy as np
-import torch
 
 from .analysis import T1_RANGE_1P5T, midwall_mask, slice_stats
-from .data import normalize
 from .io import pad_crop
-from .model import UNet
-from .polar import C_DEPTH, N_ANGLES, from_polar, to_polar
-from .postprocess import postprocess_series
-from .t1fit import fit_map
+from .postprocess import build_steps
+from .registry import ALIGNERS, FITTERS, SEGMENTERS
 
-MIN_GOOD_IMAGES = 8  # paper: reconstruct only if >= 8 of 11 images segmented OK
-
-
-def get_device():
-    if torch.cuda.is_available():
-        return torch.device("cuda")
-    if torch.backends.mps.is_available():
-        return torch.device("mps")
-    return torch.device("cpu")
+DEFAULTS = dict(
+    size=256,
+    segmenter={"name": "ground_truth"},
+    postprocess=None,                      # None = paper chain
+    aligner={"name": "polar"},
+    fitter={"name": "2p"},
+    min_good_images=8,                     # paper: >= 8 of 11 images segmented OK
+    analysis=dict(midwall_fraction=1 / 3, t1_range=list(T1_RANGE_1P5T)),
+)
 
 
-def load_model(ckpt, device=None):
-    device = device or get_device()
-    ck = torch.load(ckpt, map_location=device)
-    model = UNet(**ck.get("model_kwargs", {})).to(device).eval()
-    model.load_state_dict(ck["model"])
-    return model
+class Pipeline:
+    def __init__(self, segmenter, steps, aligner, fitter, size=256, min_good_images=8, analysis=None):
+        self.segmenter, self.steps, self.aligner, self.fitter = segmenter, steps, aligner, fitter
+        self.size, self.min_good = size, min_good_images
+        self.analysis = {**DEFAULTS["analysis"], **(analysis or {})}
 
+    @classmethod
+    def from_config(cls, cfg, **override):
+        """cfg: dict with any of the DEFAULTS keys (top level or under 'pipeline:')."""
+        c = {**DEFAULTS, **cfg.get("pipeline", cfg), **override}
+        seg = c["segmenter"]
+        if isinstance(seg, dict) and seg.get("name") == "torch" and "device" in cfg:
+            seg = {"device": cfg["device"], **seg}
+        return cls(SEGMENTERS.build(seg), build_steps(c["postprocess"]), ALIGNERS.build(c["aligner"]),
+                   FITTERS.build(c["fitter"]), c["size"], c["min_good_images"], c["analysis"])
 
-@torch.no_grad()
-def segment(model, images, size=256):
-    dev = next(model.parameters()).device
-    x = np.stack([normalize(im) for im in pad_crop(images, size)])
-    logits = model(torch.from_numpy(x)[:, None].to(dev))
-    return logits.argmax(1).cpu().numpy().astype(np.uint8)
+    def segment_only(self, images, tis, pixel_spacing=(1.4, 1.4), **ctx):
+        images = pad_crop(np.asarray(images, np.float32), self.size)
+        tis = np.asarray(tis, float)
+        raw = self.segmenter(images, tis, **ctx)
+        masks, ok = raw.astype(np.uint8), np.ones(len(raw), bool)
+        for f in self.steps:
+            masks, ok = f(masks, ok, tis, pixel_spacing)
+        return dict(images=images, tis=tis, raw_masks=raw, masks=masks, ok=ok)
 
-
-def run_slice(images, tis, masks=None, model=None, pixel_spacing=(1.4, 1.4), fit_model="2p",
-              min_good=MIN_GOOD_IMAGES, t1_range=T1_RANGE_1P5T, reference="shortest_ti"):
-    """Process one slice. Pass `masks` to bypass the FCN (e.g. to test with manual masks).
-
-    Returns dict with masks, ok flags, polar map, Cartesian T1 map, mid-wall mask, stats.
-    """
-    images = pad_crop(np.asarray(images, np.float32), 256)
-    tis = np.asarray(tis, float)
-    raw = segment(model, images) if masks is None else pad_crop(np.asarray(masks, np.uint8), 256)
-    masks, ok = postprocess_series(raw, tis, pixel_spacing)
-    out = dict(raw_masks=raw, masks=masks, ok=ok, images=images, tis=tis)
-    if ok.sum() < min_good:
-        out["status"] = f"skipped: only {ok.sum()}/{len(ok)} usable masks"
+    def __call__(self, images, tis, pixel_spacing=(1.4, 1.4), **ctx):
+        out = self.segment_only(images, tis, pixel_spacing, **ctx)
+        ok = out["ok"]
+        if ok.sum() < self.min_good:
+            out["status"] = f"skipped: only {ok.sum()}/{len(ok)} usable masks"
+            return out
+        al = self.aligner.align(out["images"], out["masks"], ok, out["tis"])
+        t1_common = self.fitter(al.stack, al.tis)
+        t1_map = al.to_image(t1_common)
+        mid = midwall_mask(al.ref_mask, self.analysis["midwall_fraction"])
+        out.update(status="ok", aligned=al.stack, t1_common=t1_common, t1_map=t1_map,
+                   ref_index=al.ref_index, midwall=mid,
+                   stats=slice_stats(t1_map, mid, tuple(self.analysis["t1_range"])))
         return out
 
-    idx = np.where(ok)[0]
-    polar = np.stack([to_polar(images[k], masks[k], N_ANGLES, C_DEPTH)[0] for k in idx])
-    polar_t1 = fit_map(polar, tis[idx], fit_model)
 
-    good_tis = np.where(np.isfinite(tis[idx]), tis[idx], np.inf)
-    k_ref = idx[np.argmin(good_tis)] if reference == "shortest_ti" else idx[np.argmax(good_tis)]
-    t1_map = from_polar(polar_t1, masks[k_ref])
-    mid = midwall_mask(masks[k_ref])
-    out.update(status="ok", polar=polar, polar_t1=polar_t1, t1_map=t1_map, ref_index=int(k_ref),
-               midwall=mid, stats=slice_stats(t1_map, mid, t1_range))
-    return out
+def run_slice(images, tis, masks=None, checkpoint=None, pixel_spacing=(1.4, 1.4), **cfg):
+    """Convenience wrapper: GT masks if `masks` given, else a torch checkpoint."""
+    seg = {"name": "ground_truth"} if checkpoint is None else {"name": "torch", "checkpoint": checkpoint}
+    return Pipeline.from_config({"segmenter": seg, **cfg})(images, tis, pixel_spacing, masks=masks)
