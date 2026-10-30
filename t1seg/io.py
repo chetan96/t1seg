@@ -49,6 +49,31 @@ def _dicom_ti(ds):
     return float(m.group(1)) if m else np.nan
 
 
+def load_mat(path, verbose=False):
+    """Load a .mat file and return its contents as a dict of numpy arrays.
+
+    Works with both MATLAB v5 (scipy) and v7.3/HDF5 (h5py) files.
+    If *verbose*, prints each key with dtype and shape.
+    """
+    path = Path(path)
+    try:
+        from scipy.io import loadmat
+        d = loadmat(str(path), squeeze_me=False)
+        out = {k: v for k, v in d.items() if not k.startswith("_")}
+    except NotImplementedError:
+        import h5py
+        out = {}
+        with h5py.File(str(path), "r") as f:
+            for k in f:
+                v = f[k]
+                out[k] = v[()].T if isinstance(v, h5py.Dataset) else v
+    if verbose:
+        for k, v in out.items():
+            v = np.asarray(v)
+            print(f"  {k:24s}  {str(v.dtype):10s}  {v.shape}")
+    return out
+
+
 def load_dicom_series(folder):
     """Load the T1-weighted images of ONE slice from a folder of DICOMs.
 
