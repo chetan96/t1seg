@@ -37,7 +37,7 @@ class Pipeline:
         """cfg: dict with any of the DEFAULTS keys (top level or under 'pipeline:')."""
         c = {**DEFAULTS, **cfg.get("pipeline", cfg), **override}
         seg = c["segmenter"]
-        if isinstance(seg, dict) and seg.get("name") == "torch" and "device" in cfg:
+        if isinstance(seg, dict) and seg.get("name") in ("torch", "cinema") and "device" in cfg:
             seg = {"device": cfg["device"], **seg}
         return cls(SEGMENTERS.build(seg), build_steps(c["postprocess"]), ALIGNERS.build(c["aligner"]),
                    FITTERS.build(c["fitter"]), c["size"], c["min_good_images"], c["analysis"])
@@ -45,7 +45,7 @@ class Pipeline:
     def segment_only(self, images, tis, pixel_spacing=(1.4, 1.4), **ctx):
         images = pad_crop(np.asarray(images, np.float32), self.size)
         tis = np.asarray(tis, float)
-        raw = self.segmenter(images, tis, **ctx)
+        raw = self.segmenter(images, tis, pixel_spacing=pixel_spacing, **ctx)
         masks, ok = raw.astype(np.uint8), np.ones(len(raw), bool)
         for f in self.steps:
             masks, ok = f(masks, ok, tis, pixel_spacing)

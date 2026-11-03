@@ -3,7 +3,7 @@ name = "t1seg"
 version = "0.1.0"
 description = "Automated myocardial T1 mapping analysis (Fahmy et al., JCMR 2019) in PyTorch"
 requires-python = ">=3.10"
-optional-dependencies = { zoo = ["segmentation-models-pytorch", "monai"], dev = ["pytest"] }
+optional-dependencies = { zoo = ["segmentation-models-pytorch", "monai"], cinema = ["cinema @ git+https://github.com/mathpluscode/CineMA", "einops", "hydra-core", "omegaconf", "monai", "safetensors", "timm", "SimpleITK", "huggingface_hub"], dev = ["pytest"] }
 dependencies = ["torch", "numpy", "scipy", "scikit-image", "matplotlib", "pydicom", "nibabel", "pyyaml", "tqdm"]
 
 [tool.setuptools]
