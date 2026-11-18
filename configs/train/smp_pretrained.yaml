@@ -1,0 +1,34 @@
+# SMP U-Net with ImageNet-pretrained ResNet-34 encoder.
+# The encoder starts with strong low-level features; only the decoder trains from scratch.
+# Expects 1-channel input — the first conv is replaced automatically by SMP.
+#
+#   python scripts/train.py -c configs/train/smp_pretrained.yaml
+#   python scripts/train.py -c configs/train/smp_pretrained.yaml --set train.epochs=50 optimizer.lr=1e-4
+device: auto
+plugins: []
+
+data:
+  train: {name: npz_slices, root: data/synthetic/train, size: 256, augment: true, normalization: zscore}
+  val:   {name: npz_slices, root: data/synthetic/val,   size: 256, normalization: zscore}
+
+model:
+  name: smp
+  arch: Unet
+  encoder_name: resnet34
+  encoder_weights: imagenet
+  in_channels: 1
+  n_classes: 2
+
+loss:
+  - {name: ce, weight: 1.0}
+  - {name: dice, weight: 0.5}
+
+optimizer: {name: AdamW, lr: 3.0e-4, weight_decay: 1.0e-4}
+scheduler: {name: CosineAnnealingLR, T_max: 30}
+
+train:
+  epochs: 30
+  batch_size: 8
+  num_workers: 0
+  seed: 0
+  out_dir: runs/smp_pretrained

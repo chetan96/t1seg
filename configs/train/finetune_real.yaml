@@ -1,0 +1,38 @@
+# Fine-tune a pretrained checkpoint on real T1 mapping data.
+#
+# Point init_from at the synthetic-pretrained checkpoint and data.train.root / data.val.root
+# at directories of real .npz slices (from scripts/convert_mat.py).
+#
+#   python scripts/train.py -c configs/train/finetune_real.yaml
+#   python scripts/train.py -c configs/train/finetune_real.yaml \
+#       --set train.init_from=runs/smp_pretrained/best.pt \
+#              model.name=smp model.encoder_name=resnet34 model.encoder_weights=null
+#
+# Tips:
+#   - Lower LR than training from scratch (1e-4 vs 1e-3)
+#   - Fewer epochs (10-20 is usually enough)
+#   - If you have very few real slices (<10), freeze the encoder:
+#       --set train.freeze_encoder=true   (not yet implemented — manually freeze if needed)
+device: auto
+plugins: []
+
+data:
+  train: {name: npz_slices, root: data/real_slices/train, size: 256, augment: true, normalization: zscore}
+  val:   {name: npz_slices, root: data/real_slices/val,   size: 256, normalization: zscore}
+
+model: {name: unet, in_channels: 1, n_classes: 2, base: 32, depth: 4, dropout: 0.2}
+
+loss:
+  - {name: ce, weight: 1.0}
+  - {name: dice, weight: 0.5}
+
+optimizer: {name: Adam, lr: 1.0e-4, weight_decay: 1.0e-4}
+scheduler: {name: CosineAnnealingLR, T_max: 15}
+
+train:
+  epochs: 15
+  batch_size: 4
+  num_workers: 0
+  seed: 0
+  init_from: runs/unet_paper/best.pt
+  out_dir: runs/finetune_real

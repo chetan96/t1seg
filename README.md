@@ -5,9 +5,10 @@ native T1 mapping images using fully convolutional neural networks", JCMR 2019*
 ([doi:10.1186/s12968-018-0516-1](https://doi.org/10.1186/s12968-018-0516-1)).
 The authors did not release code, so this is built from the Methods section.
 
-**Status:** pipeline complete and unit-tested on synthetic data; no real data wired in yet.
-An 8-epoch synthetic run (~6 min on an M2 via MPS) reaches val DSC ≈ 0.60 — train longer
-(`epochs: 30+`) for meaningful masks. Paper reports DSC 0.85 ± 0.07 on real STONE data.
+**Status:** pipeline complete and unit-tested on synthetic data; real-data converter and
+CineMA transfer baselines ready. An 8-epoch synthetic run (~6 min on an M2 via MPS) reaches
+val DSC ≈ 0.60 — train longer (`epochs: 30+`) for meaningful masks. Paper reports
+DSC 0.85 ± 0.07 on real STONE data. See [USAGE.md](USAGE.md) for the full walkthrough.
 
 ## Design: every stage is a plug-in
 
@@ -77,10 +78,9 @@ an x86/Rosetta conda gets no GPU and an old PyTorch.
 
 ```bash
 python scripts/make_synthetic.py --n-train 60 --n-val 10 --n-test 5
-python scripts/train.py   -c configs/train/unet_paper.yaml            # or configs/train/smp_resnet34.yaml
+python scripts/train.py   -c configs/train/unet_paper.yaml
 python scripts/segment.py -c configs/pipeline/paper_stone.yaml --inputs data/synthetic/test/slice_*[0-9].npz
 python scripts/run_pipeline.py -c configs/pipeline/paper_stone.yaml --inputs data/synthetic/test/slice_*[0-9].npz
-python scripts/run_pipeline.py --inputs … --set pipeline.segmenter.name=ground_truth   # test stages after segmentation
 pytest -q tests
 ```
 
@@ -88,12 +88,101 @@ Figures + `summary.json` land in `outputs/`. Each training run writes `config.js
 
 Synthetic sanity check (GT masks, 3 slices): T1 error ≈ 10 ms with `polar` alignment vs 38–112 ms with `none`.
 
+## Training workflows
+
+Four workflows are supported end to end. Each has a dedicated config and can be
+customised with `--set` overrides. See [USAGE.md](USAGE.md) for the full details.
+
+### 1. Train from scratch
+
+Train on synthetic data with randomly initialised weights:
+
+```bash
+# Paper U-Net (~7.8M params)
+python scripts/train.py -c configs/train/unet_paper.yaml
+
+# SMP ResNet-34 U-Net (no pretrained encoder)
+python scripts/train.py -c configs/train/smp_resnet34.yaml
+```
+
+### 2. Pretrain (ImageNet encoder)
+
+SMP U-Net with an ImageNet-pretrained ResNet-34 encoder — the encoder starts with
+strong low-level features, only the decoder trains from scratch:
+
+```bash
+python scripts/train.py -c configs/train/smp_pretrained.yaml
+
+# Other encoders / architectures
+python scripts/train.py -c configs/train/smp_pretrained.yaml \
+    --set model.encoder_name=resnet50
+python scripts/train.py -c configs/train/smp_pretrained.yaml \
+    --set model.arch=UnetPlusPlus model.encoder_name=efficientnet-b3
+```
+
+Requires: `pip install segmentation-models-pytorch`
+
+### 3. Fine-tune on real data
+
+Take a checkpoint pretrained on synthetic data and fine-tune it on real T1
+mapping slices (lower LR, fewer epochs):
+
+```bash
+# Convert real .mat data to .npz first
+python scripts/convert_mat.py \
+    --images /path/to/images.mat --masks /path/to/masks.mat \
+    --out data/real_slices --filter-empty
+
+# Fine-tune (default: loads runs/unet_paper/best.pt)
+python scripts/train.py -c configs/train/finetune_real.yaml
+
+# Fine-tune from an SMP pretrained checkpoint instead
+python scripts/train.py -c configs/train/finetune_real.yaml \
+    --set train.init_from=runs/smp_pretrained/best.pt \
+           model.name=smp model.encoder_name=resnet34 model.encoder_weights=null
+```
+
+### 4. Inference
+
+**Standalone** — only needs a checkpoint and `.npz` input files:
+
+```bash
+# Model predictions only
+python scripts/inference.py --checkpoint runs/unet_paper/best.pt \
+    --inputs data/synthetic/test/*.npz --out outputs/inference
+
+# With paper post-processing
+python scripts/inference.py --checkpoint runs/unet_paper/best.pt \
+    --inputs data/synthetic/test/*.npz --out outputs/inference --postprocess
+
+# Full pipeline (segment -> align -> T1 fit -> stats)
+python scripts/inference.py --checkpoint runs/unet_paper/best.pt \
+    --inputs data/synthetic/test/*.npz --out outputs/full --full-pipeline
+```
+
+**Pipeline-config-driven** — full control over each stage:
+
+```bash
+# Segmentation only (masks + Dice)
+python scripts/segment.py -c configs/pipeline/paper_stone.yaml \
+    --inputs data/synthetic/test/*.npz
+
+# Full pipeline with T1 map
+python scripts/run_pipeline.py -c configs/pipeline/paper_stone.yaml \
+    --inputs data/synthetic/test/*.npz
+
+# CineMA transfer baseline on real data
+python scripts/segment.py -c configs/pipeline/cinema_acdc.yaml \
+    --inputs data/real_slices/*.npz --out outputs/cinema_acdc
+```
+
+Output per slice: `_masks.npz` (predictions), `.png` (overlay), `summary.json` (Dice + stats).
+
 ## Using real data
 
 The `npz_slices` dataset reads one `.npz` per slice: `images (K,H,W)`, `tis (K,)` ms (`np.inf` allowed),
-optional `masks (K,H,W)`, `pixel_spacing (2,)`. Write a converter to that format
-(`t1seg/io.py` has `save_slice` and a best-effort `load_dicom_series`) and point the config at it — or register
-your own `DATASETS` / `SEGMENTERS` entry that reads the native format directly.
+optional `masks (K,H,W)`, `pixel_spacing (2,)`. Use `scripts/convert_mat.py` to convert `.mat` files,
+`t1seg/io.py:load_dicom_series` for DICOMs, or register your own `DATASETS` / `SEGMENTERS` entry.
 
 Public data options:
 - **CMRxRecon (2023/2024)** — multi-coil k-space plus reconstructed T1 mapping (MOLLI, 9 TIs) for ~300
