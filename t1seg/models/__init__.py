@@ -6,7 +6,7 @@ architecture -- built-in, third-party, or your own plugin -- reloads with load_c
 import torch
 
 from ..registry import MODELS, import_plugins
-from . import external, unet  # noqa: F401  (registers built-ins)
+from . import cinema_adapter, external, unet  # noqa: F401  (registers built-ins)
 from .unet import UNet  # noqa: F401
 
 

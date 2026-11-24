@@ -33,6 +33,18 @@ python scripts/finetune_eval.py \
     --data data/real_slices \
     --checkpoint runs/smp_pretrained/best.pt \
     --epochs 15
+
+# Fine-tune CineMA (UK Biobank + ACDC pretrained) — no .pt checkpoint needed
+python scripts/finetune_eval.py \
+    --data data/real_slices \
+    --model-config '{"name":"cinema_ft","dataset":"acdc"}' \
+    --epochs 15
+
+# Fine-tune CineMA M&Ms variant
+python scripts/finetune_eval.py \
+    --data data/real_slices \
+    --model-config '{"name":"cinema_ft","dataset":"mnms"}' \
+    --epochs 15
 """
 import argparse
 import json
@@ -153,8 +165,14 @@ def main():
         epilog=__doc__)
     ap.add_argument("--data", required=True,
                     help="directory of .npz slices (from convert_mat.py)")
-    ap.add_argument("--checkpoint", required=True,
-                    help="pretrained checkpoint to start from")
+    ap.add_argument("--checkpoint", default=None,
+                    help="pretrained checkpoint (.pt) to start from")
+    ap.add_argument("--model-config", default=None,
+                    help='build model from config instead of a .pt checkpoint, '
+                         'e.g. \'{"name":"cinema_ft","dataset":"acdc"}\'')
+    ap.add_argument("--normalization-cinema", default="percentile",
+                    choices=["zscore", "minmax", "percentile"],
+                    help="normalization for CineMA models (default: percentile)")
     ap.add_argument("--split", type=float, nargs=3, default=[0.6, 0.2, 0.2],
                     metavar=("TRAIN", "VAL", "TEST"),
                     help="train/val/test fractions (default: 0.6 0.2 0.2)")
@@ -183,6 +201,17 @@ def main():
 
     if args.finetuned_checkpoint:
         args.skip_train = True
+
+    if not args.checkpoint and not args.model_config:
+        ap.error("either --checkpoint or --model-config is required")
+
+    if args.model_config:
+        import json as _json
+        args._model_cfg = _json.loads(args.model_config)
+        if "cinema" in args._model_cfg.get("name", ""):
+            args.normalization = args.normalization_cinema
+    else:
+        args._model_cfg = None
 
     device = resolve_device(args.device)
     out = Path(args.out)
@@ -216,11 +245,18 @@ def main():
 
     # --- 2. Baseline inference on test set ---
     print(f"\n{'='*58}")
-    print(f"BASELINE: {args.checkpoint}")
+    if args._model_cfg:
+        print(f"BASELINE: {args._model_cfg['name']} (from HuggingFace)")
+        model_base = build_model(args._model_cfg).to(device).eval()
+        model_cfg = args._model_cfg
+        ck = {"model_cfg": model_cfg}
+    else:
+        print(f"BASELINE: {args.checkpoint}")
+        model_base, ck = load_checkpoint(args.checkpoint, device)
+        model_cfg = ck.get("model_cfg", {"name": "unet", "in_channels": 1, "n_classes": 2, "base": 32, "depth": 4})
     print(f"{'='*58}")
-    model_base, ck = load_checkpoint(args.checkpoint, device)
     n_params = sum(p.numel() for p in model_base.parameters()) / 1e6
-    print(f"Model: {ck.get('model_cfg', {}).get('name', '?')} ({n_params:.2f}M params)")
+    print(f"Model: {model_cfg.get('name', '?')} ({n_params:.2f}M params)")
     if "val_dice" in ck:
         print(f"Checkpoint val DSC: {ck['val_dice']:.3f}")
 
@@ -259,7 +295,7 @@ def main():
                     "normalization": args.normalization,
                 },
             },
-            "model": ck.get("model_cfg", {"name": "unet", "in_channels": 1, "n_classes": 2, "base": 32, "depth": 4}),
+            "model": model_cfg,
             "loss": [
                 {"name": "ce", "weight": 1.0},
                 {"name": "dice", "weight": 0.5},
@@ -271,7 +307,7 @@ def main():
                 "batch_size": args.batch_size,
                 "num_workers": 0,
                 "seed": args.seed,
-                "init_from": args.checkpoint,
+                "init_from": args.checkpoint,  # None for --model-config (weights already loaded)
                 "out_dir": str(out / "checkpoints"),
             },
         }
@@ -301,7 +337,7 @@ def main():
     print_comparison(baseline_results, finetuned_results)
 
     summary = {
-        "baseline_checkpoint": args.checkpoint,
+        "baseline_checkpoint": args.checkpoint or json.dumps(args._model_cfg),
         "finetuned_checkpoint": ft_checkpoint,
         "split": split_info,
         "baseline_dice_mean": float(np.mean(base_dices)) if base_dices else None,
