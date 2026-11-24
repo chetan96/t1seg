@@ -12,4 +12,4 @@ ap = argparse.ArgumentParser()
 ap.add_argument("-c", "--config", default="configs/train/unet_paper.yaml")
 ap.add_argument("--set", nargs="*", default=[], metavar="KEY=VALUE", help="dotted config overrides")
 args = ap.parse_args()
-train(load_config(args.config, args.set))
+train(load_config(args.config, args.set))[0]

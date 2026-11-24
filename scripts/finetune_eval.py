@@ -268,8 +268,6 @@ def main():
         print("WARNING: no ground truth masks found — Dice cannot be computed")
 
     (out / "baseline_results.json").write_text(json.dumps(baseline_results, indent=1))
-    del model_base
-    torch.cuda.empty_cache() if torch.cuda.is_available() else None
 
     # --- 3. Fine-tune ---
     if not args.skip_train:
@@ -312,17 +310,25 @@ def main():
             },
         }
         (out / "finetune_config.json").write_text(json.dumps(ft_cfg, indent=1))
-        best_pt = train(ft_cfg)
+        best_pt, model_ft = train(ft_cfg, model=model_base)
         ft_checkpoint = str(best_pt)
     else:
         ft_checkpoint = args.finetuned_checkpoint or str(out / "checkpoints" / "best.pt")
         print(f"\nSkipping training — using checkpoint: {ft_checkpoint}")
+    del model_base
+    torch.cuda.empty_cache() if torch.cuda.is_available() else None
 
     # --- 4. Fine-tuned inference on the same test set ---
     print(f"\n{'='*58}")
     print(f"FINE-TUNED: {ft_checkpoint}")
     print(f"{'='*58}")
-    model_ft, ck_ft = load_checkpoint(ft_checkpoint, device)
+    if not args.skip_train:
+        # model_ft already holds the best weights from train()
+        ck_ft = torch.load(ft_checkpoint, map_location=device, weights_only=False)
+        model_ft.load_state_dict(ck_ft["model"])
+        model_ft.eval()
+    else:
+        model_ft, ck_ft = load_checkpoint(ft_checkpoint, device)
     if "val_dice" in ck_ft:
         print(f"Checkpoint val DSC: {ck_ft['val_dice']:.3f}")
 

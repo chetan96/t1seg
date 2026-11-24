@@ -38,7 +38,7 @@ def build_scheduler(opt, cfg):
     return getattr(torch.optim.lr_scheduler, cfg.pop("name"))(opt, **cfg)
 
 
-def train(cfg):
+def train(cfg, model=None):
     dc, tc = cfg["data"], cfg["train"]
     device = resolve_device(cfg.get("device", "auto"))
     torch.manual_seed(tc.get("seed", 0))
@@ -49,13 +49,16 @@ def train(cfg):
     train_dl = DataLoader(train_ds, tc["batch_size"], shuffle=True, **lk)
     val_dl = DataLoader(val_ds, tc["batch_size"], **lk)
 
-    model = build_model(cfg["model"]).to(device)
+    if model is None:
+        model = build_model(cfg["model"]).to(device)
+        if tc.get("init_from"):
+            n, tot = init_weights_from(model, tc["init_from"])
+            print(f"transfer learning: loaded {n}/{tot} tensors from {tc['init_from']}")
+    else:
+        model = model.to(device)
     n_params = sum(p.numel() for p in model.parameters()) / 1e6
     print(f"device={device} model={cfg['model']['name']} ({n_params:.2f}M) "
           f"train_imgs={len(train_ds)} val_imgs={len(val_ds)}")
-    if tc.get("init_from"):
-        n, tot = init_weights_from(model, tc["init_from"])
-        print(f"transfer learning: loaded {n}/{tot} tensors from {tc['init_from']}")
 
     loss_fn = build_loss(cfg.get("loss", "ce")).to(device)
     opt = build_optimizer(model.parameters(), cfg.get("optimizer", {"name": "Adam", "lr": 1e-3}))
@@ -87,4 +90,4 @@ def train(cfg):
             save_checkpoint(out / "best.pt", model, cfg["model"], cfg.get("plugins"), **meta)
         (out / "log.json").write_text(json.dumps(log, indent=1))
     print(f"best val DSC {best:.3f} -> {out / 'best.pt'}")
-    return out / "best.pt"
+    return out / "best.pt", model
