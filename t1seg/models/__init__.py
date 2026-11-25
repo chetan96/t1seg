@@ -14,9 +14,14 @@ def build_model(cfg):
     return MODELS.build(cfg)
 
 
-def save_checkpoint(path, model, model_cfg, plugins=None, **meta):
-    torch.save(dict(model=model.state_dict(), model_cfg=dict(model_cfg), plugins=list(plugins or []), **meta),
-               path)
+def save_checkpoint(path, model, model_cfg, plugins=None, optimizer=None, scheduler=None, **meta):
+    d = dict(model=model.state_dict(), model_cfg=dict(model_cfg), plugins=list(plugins or []))
+    if optimizer is not None:
+        d["optimizer"] = optimizer.state_dict()
+    if scheduler is not None:
+        d["scheduler"] = scheduler.state_dict()
+    d.update(meta)
+    torch.save(d, path)
 
 
 def load_checkpoint(path, device="cpu", strict=True):

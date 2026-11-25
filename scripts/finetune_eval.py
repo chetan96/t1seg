@@ -189,6 +189,8 @@ def main():
     ap.add_argument("--lr", type=float, default=1e-4)
     ap.add_argument("--batch-size", type=int, default=4)
     ap.add_argument("--weight-decay", type=float, default=1e-4)
+    ap.add_argument("--patience", type=int, default=0,
+                    help="early stopping: stop after N epochs without val Dice improvement (0=disabled)")
 
     # Shortcuts
     ap.add_argument("--skip-train", action="store_true",
@@ -307,6 +309,7 @@ def main():
                 "seed": args.seed,
                 "init_from": args.checkpoint,  # None for --model-config (weights already loaded)
                 "out_dir": str(out / "checkpoints"),
+                "patience": args.patience,
             },
         }
         (out / "finetune_config.json").write_text(json.dumps(ft_cfg, indent=1))

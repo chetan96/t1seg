@@ -64,11 +64,32 @@ def train(cfg, model=None):
     opt = build_optimizer(model.parameters(), cfg.get("optimizer", {"name": "Adam", "lr": 1e-3}))
     sched = build_scheduler(opt, cfg.get("scheduler"))
 
+    start_epoch = 0
+    best = -1.0
+    log = []
+
+    if tc.get("resume_from"):
+        ck = torch.load(tc["resume_from"], map_location=device, weights_only=False)
+        model.load_state_dict(ck["model"])
+        if "optimizer" in ck:
+            opt.load_state_dict(ck["optimizer"])
+        if "scheduler" in ck and sched is not None:
+            sched.load_state_dict(ck["scheduler"])
+        start_epoch = ck.get("epoch", -1) + 1
+        best = ck.get("best_val_dice", ck.get("val_dice", -1.0))
+        log_path = Path(tc["out_dir"]) / "log.json"
+        if log_path.exists():
+            log = json.loads(log_path.read_text())
+        print(f"resuming from epoch {start_epoch}, best val DSC so far {best:.3f}")
+
     out = Path(tc["out_dir"])
     out.mkdir(parents=True, exist_ok=True)
     (out / "config.json").write_text(json.dumps(cfg, indent=1))
-    best, log = -1.0, []
-    for ep in range(tc["epochs"]):
+
+    patience = tc.get("patience", 0)
+    epochs_no_improve = 0
+
+    for ep in range(start_epoch, tc["epochs"]):
         model.train()
         losses = []
         for x, y in tqdm(train_dl, desc=f"epoch {ep}", leave=False):
@@ -83,11 +104,19 @@ def train(cfg, model=None):
         d_mean, d_sd = evaluate(model, val_dl, device)
         log.append(dict(epoch=ep, loss=float(np.mean(losses)), val_dice=d_mean, val_dice_sd=d_sd))
         print(f"epoch {ep:3d}  loss {np.mean(losses):.4f}  val DSC {d_mean:.3f} ± {d_sd:.3f}", flush=True)
-        meta = dict(epoch=ep, val_dice=d_mean, config=cfg)
-        save_checkpoint(out / "last.pt", model, cfg["model"], cfg.get("plugins"), **meta)
+        meta = dict(epoch=ep, val_dice=d_mean, best_val_dice=max(best, d_mean), config=cfg)
+        save_checkpoint(out / "last.pt", model, cfg["model"], cfg.get("plugins"),
+                        optimizer=opt, scheduler=sched, **meta)
         if d_mean > best:
             best = d_mean
-            save_checkpoint(out / "best.pt", model, cfg["model"], cfg.get("plugins"), **meta)
+            epochs_no_improve = 0
+            save_checkpoint(out / "best.pt", model, cfg["model"], cfg.get("plugins"),
+                            optimizer=opt, scheduler=sched, **meta)
+        else:
+            epochs_no_improve += 1
         (out / "log.json").write_text(json.dumps(log, indent=1))
+        if patience and epochs_no_improve >= patience:
+            print(f"early stopping: no val DSC improvement for {patience} epochs")
+            break
     print(f"best val DSC {best:.3f} -> {out / 'best.pt'}")
     return out / "best.pt", model
